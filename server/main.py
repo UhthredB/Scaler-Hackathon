@@ -1,25 +1,21 @@
-"""
-Job Application Simulator - FastAPI Server
+"""Main FastAPI application for Job Application Simulator."""
 
-Run with: uvicorn server.main:app --reload
-"""
-
-from fastapi import FastAPI, HTTPException
+import os
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 import uvicorn
 
-from .job_app_environment import JobAppEnvironment
+from job_app_environment import env
 
-# Create app
 app = FastAPI(
     title="Job Application Simulator",
-    description="OpenEnv environment for training agents to apply for jobs",
-    version="0.1.0"
+    description="An OpenEnv-compliant environment simulating job applications",
+    version="1.0.0"
 )
 
-# CORS for local development
+# Add CORS for HF Spaces
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -28,93 +24,124 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Global environment instance
-env = JobAppEnvironment()
 
-
-# ============================================================================
-# REQUEST/RESPONSE MODELS
-# ============================================================================
-
+# Request models
 class ResetRequest(BaseModel):
     profile_name: str = "software_engineer"
-    budget: int = 10
-    difficulty: str = "normal"
 
 
-class ActionRequest(BaseModel):
+class StepRequest(BaseModel):
     episode_id: str
-    action: Dict[str, Any]
+    action: str
+    job_id: Optional[str] = None
+    query: Optional[str] = None
+    cover_letter: Optional[str] = None
 
 
-# ============================================================================
-# ENDPOINTS
-# ============================================================================
-
+# Health endpoints
 @app.get("/")
-async def root():
-    """Health check"""
-    return {"status": "ok", "environment": "job-application-simulator"}
+def root():
+    return {"status": "running", "service": "job-application-simulator", "version": "1.0.0"}
 
 
 @app.get("/health")
-async def health():
-    """Health check endpoint for HF Spaces"""
+def health():
     return {"status": "healthy"}
 
 
+# OpenEnv required endpoints
 @app.post("/reset")
-async def reset(request: ResetRequest):
-    """Start a new episode"""
-    try:
-        state = env.reset(
-            profile_name=request.profile_name,
-            budget=request.budget,
-            difficulty=request.difficulty
-        )
-        return state.model_dump()
-    except Exception as e:
-        import traceback
-        return {"error": str(e), "traceback": traceback.format_exc()}
+def reset(request: ResetRequest = ResetRequest()):
+    """Reset environment and start new episode."""
+    state = env.reset(request.profile_name)
+    return {
+        "episode_id": state.episode_id,
+        "profile": state.current_profile,
+        "budget": state.budget_remaining,
+        "message": state.messages[-1] if state.messages else "Episode started"
+    }
 
 
 @app.post("/step")
-async def step(request: ActionRequest):
-    """Execute an action in the episode"""
-    return env.step(request.episode_id, request.action)
-
-
-@app.get("/state/{episode_id}")
-async def get_state(episode_id: str):
-    """Get current episode state"""
-    result = env.step(episode_id, {"type": "state"})
-    if "error" in result:
-        raise HTTPException(status_code=404, detail=f"Episode {episode_id} not found")
+def step(request: StepRequest):
+    """Execute action in environment."""
+    kwargs = {}
+    if request.job_id:
+        kwargs["job_id"] = request.job_id
+    if request.query:
+        kwargs["query"] = request.query
+    if request.cover_letter:
+        kwargs["cover_letter"] = request.cover_letter
+    
+    result = env.step(request.episode_id, request.action, **kwargs)
     return result
 
 
+@app.get("/state")
+def get_state(episode_id: str = Query(..., description="Episode ID")):
+    """Get current environment state."""
+    state = env.get_state(episode_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="Episode not found")
+    return state
+
+
+@app.get("/tasks")
+def list_tasks():
+    """List available tasks."""
+    return {"tasks": env.list_tasks()}
+
+
+@app.post("/tasks/{task_id}/grade")
+def grade_task(task_id: str, episode_id: str = Query(..., description="Episode ID to grade")):
+    """Grade a specific task. Returns score in 0.0-1.0 range."""
+    result = env.grade_task(episode_id, task_id)
+    if "error" in result and result.get("error") == "Episode not found":
+        raise HTTPException(status_code=404, detail="Episode not found")
+    return result
+
+
+# Data endpoints
 @app.get("/jobs")
-async def list_jobs():
-    """List all available jobs in the database"""
-    from mock_data import get_jobs
-    return {"jobs": get_jobs()}
+def get_jobs():
+    """Get all available job listings."""
+    from mock_data import JOBS
+    return {"jobs": JOBS}
+
+
+@app.get("/jobs/{job_id}")
+def get_job(job_id: str):
+    """Get specific job details."""
+    from mock_data import get_job_by_id, PROFILES
+    job = get_job_by_id(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    # Calculate match score for default profile
+    default_profile = PROFILES.get("software_engineer", {})
+    match_score = 0.0
+    if default_profile:
+        from mock_data import calculate_match_score
+        match_score = calculate_match_score(default_profile, job)
+    return {"job": job, "match_score": match_score}
 
 
 @app.get("/profiles")
-async def list_profiles():
-    """List available applicant profiles"""
+def get_profiles():
+    """Get available applicant profiles."""
     from mock_data import PROFILES
     return {"profiles": list(PROFILES.keys())}
 
 
-# ============================================================================
-# MAIN
-# ============================================================================
+@app.get("/profiles/{profile_name}")
+def get_profile_details(profile_name: str):
+    """Get specific profile details."""
+    from mock_data import get_profile
+    profile = get_profile(profile_name)
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return {"profile": profile}
+
 
 if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--port", type=int, default=7860)
-    parser.add_argument("--host", default="0.0.0.0")
-    args = parser.parse_args()
-    uvicorn.run(app, host=args.host, port=args.port)
+    port = int(os.environ.get("PORT", 7860))
+    uvicorn.run(app, host="0.0.0.0", port=port)

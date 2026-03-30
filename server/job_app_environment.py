@@ -1,517 +1,208 @@
-"""
-Job Application Simulator - Server-Side Environment Implementation
-
-This module implements the core environment logic that runs on the server.
-"""
+"""Job Application Environment - OpenEnv compliant implementation."""
 
 import uuid
-from datetime import datetime
-from typing import Dict, List, Optional, Any
-from dataclasses import asdict
+from typing import List, Dict, Any, Optional
+from pydantic import BaseModel, Field
 import sys
 import os
-
-# Add parent directory to path for imports when running as module
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from mock_data import get_jobs, get_job_by_id, get_profile, calculate_match_score
 
-from models import (
-    JobPosting,
-    ApplicantProfile,
-    JobAnalysis,
-    SubmittedApplication,
-    JobAppState,
-    JobAppObservation,
-    SearchJobs,
-    AnalyzeJob,
-    WriteCoverLetter,
-    SubmitApplication,
-    NextJob,
-)
-from mock_data import get_jobs, get_profile
+
+class JobAppState(BaseModel):
+    """State of a job application episode."""
+    episode_id: str
+    step_count: int = 0
+    current_profile: Optional[Dict[str, Any]] = None
+    budget_remaining: float = 100.0
+    applications_submitted: List[Dict[str, Any]] = Field(default_factory=list)
+    total_reward: float = 0.0
+    done: bool = False
+    messages: List[str] = Field(default_factory=list)
 
 
 class JobAppEnvironment:
-    """
-    Core environment logic for Job Application Simulator.
+    """Job Application Simulator Environment."""
     
-    This class manages the episode state and processes actions.
-    """
-    
-    def __init__(self, job_db: Optional[List[Dict]] = None):
-        """
-        Initialize environment with job database.
-        
-        Args:
-            job_db: List of job dictionaries (uses mock data if not provided)
-        """
-        self.job_db = job_db or get_jobs()
+    def __init__(self):
         self.episodes: Dict[str, JobAppState] = {}
-    
-    def reset(
-        self,
-        profile_name: str = "software_engineer",
-        budget: int = 10,
-        difficulty: str = "normal"
-    ) -> Dict[str, Any]:
-        """
-        Start a new episode.
+        self.application_cost = 5.0  # Cost per application
+        self.max_steps = 20
         
-        Args:
-            profile_name: Name of applicant profile
-            budget: Maximum applications allowed
-            difficulty: 'easy', 'normal', or 'hard'
+    def reset(self, profile_name: str = "software_engineer") -> JobAppState:
+        """Reset environment and start new episode."""
+        episode_id = f"ep_{uuid.uuid4().hex[:8]}"
+        profile = get_profile(profile_name)
         
-        Returns:
-            Initial observation dict
-        """
-        episode_id = str(uuid.uuid4())[:8]
-        
-        # Load profile
-        profile_data = get_profile(profile_name)
-        applicant = ApplicantProfile(**profile_data)
-        
-        # Initialize state
         state = JobAppState(
             episode_id=episode_id,
-            step_count=0,
-            applicant_profile=applicant,
-            budget_remaining=budget,
-            applications_submitted=[],
-            last_search_results=[],
-            total_reward=0.0,
-            current_job=None,
-            last_analysis=None
+            current_profile=profile,
+            messages=[f"Welcome! You are applying as {profile.get('name', 'Applicant')}."]
         )
-        
         self.episodes[episode_id] = state
-        
-        return self._make_observation(state, f"Episode started. Profile: {applicant.name}. Budget: {budget} applications.")
+        return state
     
-    def step(self, episode_id: str, action: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Process an action in the episode.
-        
-        Args:
-            episode_id: Active episode ID
-            action: Action dictionary with 'type' field
-        
-        Returns:
-            Observation dict with reward and done flag
-        """
+    def step(self, episode_id: str, action: str, **kwargs) -> Dict[str, Any]:
+        """Execute action in environment."""
         state = self.episodes.get(episode_id)
         if not state:
-            return self._error_observation(f"Episode {episode_id} not found")
+            return {"error": "Episode not found", "done": True}
         
-        action_type = action.get("type", "")
+        if state.done:
+            return {"error": "Episode already completed", "done": True}
+        
         state.step_count += 1
+        result = {"step": state.step_count, "action": action}
         
-        # Route to appropriate handler
-        if action_type == "search_jobs":
-            return self._handle_search(state, action)
-        elif action_type == "analyze_job":
-            return self._handle_analyze(state, action)
-        elif action_type == "write_cover_letter":
-            return self._handle_write_letter(state, action)
-        elif action_type == "submit_application":
-            return self._handle_submit(state, action)
-        elif action_type == "next_job":
-            return self._handle_next_job(state, action)
-        elif action_type == "state":
-            return asdict(state)
-        else:
-            return self._error_observation(f"Unknown action type: {action_type}")
-    
-    # ========================================================================
-    # ACTION HANDLERS
-    # ========================================================================
-    
-    def _handle_search(self, state: JobAppState, action: Dict) -> Dict:
-        """Handle SearchJobs action"""
-        keywords = action.get("keywords", [])
-        location = action.get("location")
-        salary_min = action.get("salary_min")
-        remote_only = action.get("remote_only", False)
+        if action == "search_jobs":
+            jobs = get_jobs()
+            query = kwargs.get("query", "")
+            if query:
+                jobs = [j for j in jobs if query.lower() in j["title"].lower() or query.lower() in j["company"].lower()]
+            result["jobs"] = jobs[:5]  # Return top 5
+            result["budget_remaining"] = state.budget_remaining
+            state.messages.append(f"Searched for jobs: found {len(result['jobs'])} listings")
         
-        # Filter jobs
-        results = []
-        for job_data in self.job_db:
-            job = JobPosting(**job_data)
-            
-            # Check keywords (search in title and description)
-            if keywords:
-                text = f"{job.title} {job.description}".lower()
-                if not any(kw.lower() in text for kw in keywords):
-                    continue
-            
-            # Check location
-            if location and location.lower() not in job.location.lower():
-                if not job.remote:
-                    continue
-            
-            # Check salary
-            if salary_min and job.salary_max < salary_min:
-                continue
-            
-            # Check remote
-            if remote_only and not job.remote:
-                continue
-            
-            results.append(job)
-        
-        state.last_search_results = results
-        
-        reward = -0.1  # Cost of searching
-        state.total_reward += reward
-        
-        message = f"Found {len(results)} jobs"
-        if keywords:
-            message += f" matching '{', '.join(keywords)}'"
-        
-        return self._make_observation(state, message, reward=reward)
-    
-    def _handle_analyze(self, state: JobAppState, action: Dict) -> Dict:
-        """Handle AnalyzeJob action"""
-        job_id = action.get("job_id")
-        
-        # Find the job
-        job = self._find_job(state, job_id)
-        if not job:
-            return self._error_observation(f"Job {job_id} not found in current results")
-        
-        state.current_job = job
-        
-        # Analyze match
-        applicant = state.applicant_profile
-        matching_skills = []
-        missing_skills = []
-        
-        for req in job.requirements:
-            req_lower = req.lower()
-            # Check if any applicant skill matches this requirement
-            found = False
-            for skill in applicant.skills:
-                if skill.lower() in req_lower or req_lower in skill.lower():
-                    matching_skills.append(req)
-                    found = True
-                    break
-            if not found:
-                # Check for partial matches (e.g., "Python" matches "5+ years Python")
-                if any(skill.lower() in req_lower for skill in applicant.skills):
-                    matching_skills.append(req)
-                else:
-                    missing_skills.append(req)
-        
-        # Calculate match score
-        total_reqs = len(job.requirements)
-        if total_reqs > 0:
-            match_score = len(matching_skills) / total_reqs
-        else:
-            match_score = 1.0
-        
-        # Determine reward based on match quality
-        if match_score >= 0.7:
-            reward = 0.5
-        elif match_score >= 0.5:
-            reward = 0.1
-        else:
-            reward = -0.2
-        
-        state.total_reward += reward
-        
-        # Create analysis
-        analysis = JobAnalysis(
-            job_id=job_id,
-            match_score=match_score,
-            matching_skills=matching_skills,
-            missing_skills=missing_skills,
-            key_requirements=job.requirements[:3],
-            recommended_focus=", ".join(matching_skills[:3]) if matching_skills else "Transferable skills"
-        )
-        
-        state.last_analysis = analysis
-        
-        message = f"Match score: {match_score:.0%}. "
-        if matching_skills:
-            message += f"Strong in: {', '.join(matching_skills[:3])}. "
-        if missing_skills:
-            message += f"Missing: {', '.join(missing_skills[:2])}."
-        
-        return self._make_observation(state, message, reward=reward)
-    
-    def _handle_write_letter(self, state: JobAppState, action: Dict) -> Dict:
-        """Handle WriteCoverLetter action"""
-        job_id = action.get("job_id")
-        tone = action.get("tone", "professional")
-        highlight_skills = action.get("highlight_skills", [])
-        
-        job = self._find_job(state, job_id)
-        if not job:
-            return self._error_observation(f"Job {job_id} not found")
-        
-        applicant = state.applicant_profile
-        
-        # Generate cover letter (simplified - in real impl would use LLM)
-        skills_to_highlight = highlight_skills if highlight_skills else applicant.skills[:3]
-        
-        cover_letter = self._generate_cover_letter(
-            applicant=applicant,
-            job=job,
-            skills=skills_to_highlight,
-            tone=tone
-        )
-        
-        # Calculate quality (simplified heuristic)
-        quality = self._evaluate_cover_letter(cover_letter, job, applicant)
-        
-        # Reward based on quality
-        if quality >= 0.8:
-            reward = 1.0
-        elif quality >= 0.6:
-            reward = 0.5
-        else:
-            reward = -0.5
-        
-        state.total_reward += reward
-        
-        message = f"Cover letter generated. Quality: {quality:.0%}"
-        
-        obs = self._make_observation(state, message, reward=reward)
-        obs["cover_letter"] = cover_letter
-        obs["cover_letter_quality"] = quality
-        
-        return obs
-    
-    def _handle_submit(self, state: JobAppState, action: Dict) -> Dict:
-        """Handle SubmitApplication action"""
-        job_id = action.get("job_id")
-        cover_letter = action.get("cover_letter", "")
-        tailored_sections = action.get("tailored_resume_sections", {})
-        
-        # Check budget
-        if state.budget_remaining <= 0:
-            return self._make_observation(
-                state,
-                "Application budget exhausted!",
-                reward=-3.0,
-                done=True
-            )
-        
-        job = self._find_job(state, job_id)
-        if not job:
-            return self._error_observation(f"Job {job_id} not found")
-        
-        # Get or calculate match score
-        if state.last_analysis and state.last_analysis.job_id == job_id:
-            match_score = state.last_analysis.match_score
-        else:
-            match_score = self._quick_match(state.applicant_profile, job)
-        
-        # Deduct budget
-        state.budget_remaining -= 1
-        
-        # Create application record
-        application = SubmittedApplication(
-            job_id=job_id,
-            cover_letter=cover_letter,
-            tailored_sections=tailored_sections,
-            submission_time=datetime.now().isoformat(),
-            match_score=match_score,
-            status="pending"
-        )
-        state.applications_submitted.append(application)
-        
-        # Calculate reward
-        if match_score >= 0.7:
-            reward = 2.0
-            # Simulate acceptance for good matches
-            if match_score >= 0.8 and cover_letter:
-                application.status = "accepted"
-                reward += 3.0
-                message = f"🎉 Application accepted! Great match ({match_score:.0%})"
+        elif action == "view_job":
+            job_id = kwargs.get("job_id")
+            job = get_job_by_id(job_id)
+            if job:
+                match_score = calculate_match_score(state.current_profile, job)
+                result["job"] = job
+                result["match_score"] = match_score
+                state.messages.append(f"Viewed job: {job['title']} at {job['company']} (match: {match_score})")
             else:
-                message = f"Application submitted. Match: {match_score:.0%}"
-        elif match_score >= 0.5:
-            reward = 0.5
-            message = f"Application submitted. Decent match ({match_score:.0%})"
+                result["error"] = "Job not found"
+        
+        elif action == "apply":
+            job_id = kwargs.get("job_id")
+            cover_letter = kwargs.get("cover_letter", "")
+            job = get_job_by_id(job_id)
+            
+            if not job:
+                result["error"] = "Job not found"
+            elif state.budget_remaining < self.application_cost:
+                result["error"] = "Insufficient budget"
+                state.done = True
+            else:
+                state.budget_remaining -= self.application_cost
+                match_score = calculate_match_score(state.current_profile, job)
+                
+                # Calculate reward based on match score and cover letter quality
+                cover_letter_bonus = min(0.2, len(cover_letter) / 500)  # Up to 0.2 bonus
+                reward = match_score * 10 + cover_letter_bonus * 10
+                
+                application = {
+                    "job_id": job_id,
+                    "job_title": job["title"],
+                    "company": job["company"],
+                    "match_score": match_score,
+                    "cover_letter_length": len(cover_letter),
+                    "reward": round(reward, 2)
+                }
+                state.applications_submitted.append(application)
+                state.total_reward += reward
+                state.messages.append(f"Applied to {job['title']} at {job['company']} - reward: {reward:.2f}")
+                
+                result["application"] = application
+                result["reward"] = round(reward, 2)
+                result["budget_remaining"] = state.budget_remaining
+            
+        elif action == "check_status":
+            result["applications"] = state.applications_submitted
+            result["budget_remaining"] = state.budget_remaining
+            result["total_reward"] = state.total_reward
+        
         else:
-            reward = -1.0
-            message = f"Application submitted but poor match ({match_score:.0%}). Consider targeting better fits."
+            result["error"] = f"Unknown action: {action}"
         
-        state.total_reward += reward
+        # Check termination conditions
+        if state.step_count >= self.max_steps or state.budget_remaining < self.application_cost:
+            state.done = True
+            result["done"] = True
+            result["final_reward"] = state.total_reward
+            state.messages.append(f"Episode complete! Total reward: {state.total_reward:.2f}")
         
-        # Check if budget exhausted
-        done = state.budget_remaining <= 0
-        
-        obs = self._make_observation(state, message, reward=reward, done=done)
-        obs["application_status"] = application.status
-        
-        return obs
+        result["budget_remaining"] = state.budget_remaining
+        result["total_reward"] = state.total_reward
+        return result
     
-    def _handle_next_job(self, state: JobAppState, action: Dict) -> Dict:
-        """Handle NextJob action - cycle through search results"""
-        if not state.last_search_results:
-            return self._make_observation(state, "No search results. Use SearchJobs first.")
-        
-        # Find current job index
-        if state.current_job:
-            current_idx = next(
-                (i for i, j in enumerate(state.last_search_results) if j.id == state.current_job.id),
-                -1
-            )
-            next_idx = (current_idx + 1) % len(state.last_search_results)
-        else:
-            next_idx = 0
-        
-        state.current_job = state.last_search_results[next_idx]
-        
-        return self._make_observation(
-            state,
-            f"Viewing job {next_idx + 1} of {len(state.last_search_results)}: {state.current_job.title}"
-        )
-    
-    # ========================================================================
-    # HELPER METHODS
-    # ========================================================================
-    
-    def _find_job(self, state: JobAppState, job_id: str) -> Optional[JobPosting]:
-        """Find job by ID in search results or database"""
-        # Check search results first
-        for job in state.last_search_results:
-            if job.id == job_id:
-                return job
-        
-        # Fall back to full database
-        for job_data in self.job_db:
-            if job_data["id"] == job_id:
-                return JobPosting(**job_data)
-        
+    def get_state(self, episode_id: str) -> Optional[Dict[str, Any]]:
+        """Get current state of episode."""
+        state = self.episodes.get(episode_id)
+        if state:
+            return state.model_dump()
         return None
     
-    def _quick_match(self, applicant: ApplicantProfile, job: JobPosting) -> float:
-        """Quick match calculation"""
-        matching = 0
-        for req in job.requirements:
-            if any(skill.lower() in req.lower() for skill in applicant.skills):
-                matching += 1
-        return matching / len(job.requirements) if job.requirements else 1.0
-    
-    def _generate_cover_letter(
-        self,
-        applicant: ApplicantProfile,
-        job: JobPosting,
-        skills: List[str],
-        tone: str
-    ) -> str:
-        """Generate a simple cover letter (placeholder for LLM)"""
-        tone_openers = {
-            "professional": "I am writing to express my strong interest in",
-            "friendly": "I'm excited to apply for",
-            "technical": "I am applying for"
-        }
+    def grade_task(self, episode_id: str, task_id: str) -> Dict[str, Any]:
+        """Grade task completion. Returns score in 0.0-1.0 range."""
+        state = self.episodes.get(episode_id)
+        if not state:
+            return {"error": "Episode not found", "score": 0.0, "passed": False}
         
-        opener = tone_openers.get(tone, tone_openers["professional"])
+        if task_id == "easy_apply":
+            # Submit 3 applications with match score > 0.5
+            high_match = [a for a in state.applications_submitted if a.get("match_score", 0) > 0.5]
+            score = min(1.0, len(high_match) / 3.0)
+            return {
+                "task_id": task_id,
+                "score": round(score, 2),
+                "passed": score >= 1.0,
+                "details": f"{len(high_match)}/3 applications with match > 0.5"
+            }
         
-        letter = f"""Dear Hiring Manager,
-
-{opener} the {job.title} position at {job.company}.
-
-With {applicant.experience_years} years of experience as a {applicant.current_role}, I bring expertise in {', '.join(skills[:3])}. My background includes {applicant.resume_sections.get('experience', 'relevant professional experience')}.
-
-I am particularly drawn to {job.company}'s mission and believe my skills in {skills[0] if skills else 'software development'} would enable me to contribute meaningfully to your team.
-
-Thank you for considering my application. I look forward to the opportunity to discuss how I can contribute to {job.company}.
-
-Best regards,
-{applicant.name}
-"""
-        return letter
-    
-    def _evaluate_cover_letter(
-        self,
-        letter: str,
-        job: JobPosting,
-        applicant: ApplicantProfile
-    ) -> float:
-        """Evaluate cover letter quality (simplified heuristic)"""
-        score = 0.5  # Base score
+        elif task_id == "smart_searcher":
+            # Find and apply to 3 best matching jobs within budget
+            if state.budget_remaining < 0:
+                return {"task_id": task_id, "score": 0.0, "passed": False, "details": "Budget exceeded"}
+            high_match = [a for a in state.applications_submitted if a.get("match_score", 0) > 0.7]
+            score = min(1.0, len(high_match) / 3.0)
+            return {
+                "task_id": task_id,
+                "score": round(score, 2),
+                "passed": score >= 1.0,
+                "details": f"{len(high_match)}/3 applications with match > 0.7"
+            }
         
-        # Check for personalization
-        if job.company in letter:
-            score += 0.1
-        if job.title in letter:
-            score += 0.1
+        elif task_id == "application_master":
+            # Maximize total reward
+            max_possible = 30.0
+            score = min(1.0, state.total_reward / max_possible)
+            return {
+                "task_id": task_id,
+                "score": round(score, 2),
+                "passed": score >= 0.8,
+                "details": f"Total reward: {state.total_reward:.2f}/{max_possible}"
+            }
         
-        # Check for skill mentions
-        skills_mentioned = sum(1 for skill in applicant.skills if skill in letter)
-        score += min(0.2, skills_mentioned * 0.05)
-        
-        # Check length (not too short, not too long)
-        word_count = len(letter.split())
-        if 150 <= word_count <= 300:
-            score += 0.1
-        
-        return min(1.0, score)
+        return {"error": "Unknown task", "score": 0.0, "passed": False}
     
-    def _make_observation(
-        self,
-        state: JobAppState,
-        message: str,
-        reward: float = 0.0,
-        done: bool = False
-    ) -> Dict[str, Any]:
-        """Create observation dictionary"""
-        return {
-            "episode_id": state.episode_id,
-            "job_listings": [asdict(j) for j in state.last_search_results],
-            "current_job": asdict(state.current_job) if state.current_job else None,
-            "analysis_result": asdict(state.last_analysis) if state.last_analysis else None,
-            "budget_remaining": state.budget_remaining,
-            "applications_count": len(state.applications_submitted),
-            "message": message,
-            "done": done,
-            "reward": reward,
-            "total_reward": state.total_reward
-        }
-    
-    def _error_observation(self, error: str) -> Dict[str, Any]:
-        """Create error observation"""
-        return {
-            "job_listings": [],
-            "current_job": None,
-            "analysis_result": None,
-            "budget_remaining": 0,
-            "applications_count": 0,
-            "message": f"Error: {error}",
-            "done": False,
-            "reward": 0.0
-        }
+    def list_tasks(self) -> List[Dict[str, Any]]:
+        """Return available tasks."""
+        return [
+            {
+                "id": "easy_apply",
+                "name": "Easy Apply",
+                "difficulty": "easy",
+                "description": "Submit 3 job applications with match score > 0.5",
+                "max_reward": 1.0
+            },
+            {
+                "id": "smart_searcher",
+                "name": "Smart Searcher",
+                "difficulty": "medium",
+                "description": "Find and apply to 3 best matching jobs (match > 0.7) within budget",
+                "max_reward": 1.0
+            },
+            {
+                "id": "application_master",
+                "name": "Application Master",
+                "difficulty": "hard",
+                "description": "Maximize total reward through strategic job selection and quality applications",
+                "max_reward": 1.0
+            }
+        ]
 
 
-# For testing
-if __name__ == "__main__":
-    env = JobAppEnvironment()
-    
-    # Test reset
-    print("=== Testing Reset ===")
-    obs = env.reset(profile_name="software_engineer", budget=5)
-    print(f"Episode: {obs['episode_id']}")
-    print(f"Message: {obs['message']}")
-    
-    episode_id = obs["episode_id"]
-    
-    # Test search
-    print("\n=== Testing Search ===")
-    obs = env.step(episode_id, {"type": "search_jobs", "keywords": ["python", "remote"]})
-    print(f"Found {len(obs['job_listings'])} jobs")
-    for job in obs['job_listings'][:3]:
-        print(f"  - {job['title']} at {job['company']}")
-    
-    # Test analyze
-    print("\n=== Testing Analyze ===")
-    if obs['job_listings']:
-        job_id = obs['job_listings'][0]['id']
-        obs = env.step(episode_id, {"type": "analyze_job", "job_id": job_id})
-        print(f"Match score: {obs.get('analysis_result', {}).get('match_score', 0):.0%}")
-        print(f"Message: {obs['message']}")
-    
-    print("\n=== Done ===")
+# Global environment instance
+env = JobAppEnvironment()

@@ -1,0 +1,101 @@
+name: job-application-simulator
+description: A job application simulator where an AI agent learns to strategically search and apply for jobs, managing budget and optimizing for match quality
+version: "1.0.0"
+author: UhthredB
+
+environment:
+  type: rl
+  framework: openenv
+  max_steps: 20
+  budget_per_episode: 100.0
+
+actions:
+  - name: search_jobs
+    description: Search for available job listings
+    parameters:
+      query:
+        type: string
+        description: Search query for job title or company
+        required: false
+    cost: 0.0
+    
+  - name: view_job
+    description: View detailed information about a specific job and calculate match score
+    parameters:
+      job_id:
+        type: string
+        description: Unique identifier of the job
+        required: true
+    cost: 0.0
+    
+  - name: apply
+    description: Submit a job application with a cover letter
+    parameters:
+      job_id:
+        type: string
+        description: Unique identifier of the job
+        required: true
+      cover_letter:
+        type: string
+        description: Cover letter text for the application
+        required: false
+    cost: 5.0
+    
+  - name: check_status
+    description: Check current application status and budget
+    parameters: {}
+    cost: 0.0
+
+observations:
+  - name: job_listings
+    type: list
+    description: List of available job listings from search
+  - name: job_details
+    type: dict
+    description: Detailed information about a specific job including match score
+  - name: application_result
+    type: dict
+    description: Result of job application including reward
+  - name: budget_remaining
+    type: float
+    description: Remaining budget for the episode
+  - name: total_reward
+    type: float
+    description: Cumulative reward earned in the episode
+
+reward_structure:
+  type: cumulative
+  description: |
+    Reward is calculated based on job match score and cover letter quality.
+    Base reward = match_score * 10
+    Cover letter bonus = min(0.2, len(cover_letter) / 500) * 10
+    Total per application = base + bonus
+
+tasks:
+  - id: easy_apply
+    name: Easy Apply
+    difficulty: easy
+    description: Submit 3 job applications with match score > 0.5
+    success_criteria: 3 applications with match > 0.5
+    max_reward: 1.0
+    
+  - id: smart_searcher
+    name: Smart Searcher
+    difficulty: medium
+    description: Find and apply to 3 best matching jobs (match > 0.7) within budget
+    success_criteria: 3 applications with match > 0.7, budget >= 0
+    max_reward: 1.0
+    
+  - id: application_master
+    name: Application Master
+    difficulty: hard
+    description: Maximize total reward through strategic job selection and quality applications
+    success_criteria: Total reward >= 24.0 (80% of max)
+    max_reward: 1.0
+
+endpoints:
+  reset: POST /reset
+  step: POST /step
+  state: GET /state?episode_id={id}
+  tasks: GET /tasks
+  grade: POST /tasks/{task_id}/grade?episode_id={id}
