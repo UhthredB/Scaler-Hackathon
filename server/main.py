@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 import uvicorn
 
-from job_app_environment import env
+from server.job_app_environment import env
 
 app = FastAPI(
     title="Job Application Simulator",

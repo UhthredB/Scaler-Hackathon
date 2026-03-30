@@ -2,7 +2,25 @@
 
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict
-from openenv.core import Action, Observation, State
+
+
+# Stub base classes (openenv package doesn't exist)
+@dataclass
+class Action:
+    """Base class for actions"""
+    pass
+
+
+@dataclass
+class Observation:
+    """Base class for observations"""
+    pass
+
+
+@dataclass
+class State:
+    """Base class for environment state"""
+    pass
 
 
 # ============================================================================
